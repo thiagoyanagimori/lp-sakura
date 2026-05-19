@@ -16,59 +16,52 @@ gsap.registerPlugin(ScrollTrigger);
   const ctx = canvas.getContext('2d', { alpha: false });
 
   /* ---- Config ---- */
-  const TOTAL_FRAMES = 91;          // must match actual extracted frames
-  const FRAME_DIR    = 'frames/';   // relative path from index.html
+  const TOTAL_FRAMES = 91;
+  const FRAME_DIR    = 'frames/';
   const FRAME_PREFIX = 'frame_';
   const FRAME_EXT    = '.jpg';
 
   /* ---- Build paths ---- */
   function framePath(i) {
-    // i is 1-based: frame_0001.jpg … frame_0091.jpg
     return FRAME_DIR + FRAME_PREFIX + String(i).padStart(4, '0') + FRAME_EXT;
   }
 
   /* ---- State ---- */
-  const images   = new Array(TOTAL_FRAMES).fill(null);
+  const images = new Array(TOTAL_FRAMES).fill(null);
   let loadedCount = 0;
-  let allLoaded   = false;
 
-  // Interpolated frame index (floating-point for smooth lerp)
-  let targetFrame  = 0;   // 0-based float
+  let targetFrame  = 0;
   let currentFrame = 0;
+  let lastRenderedFrame = -1;
+
+  // Reference to the active ScrollTrigger instance so we can kill/recreate on resize
+  let st = null;
 
   /* ---- Canvas sizing ---- */
-  // Store DPR separately so drawFrame always knows the current pixel ratio
   let _dpr = 1;
 
   function resizeCanvas() {
     const wrap = canvas.parentElement;
     _dpr = Math.min(window.devicePixelRatio || 1, 2);
 
-    // Use the wrap's bounding rect for the true CSS pixel size
     const rect = wrap.getBoundingClientRect();
     const w = rect.width;
     const h = rect.height;
 
-    // Set the canvas backing buffer to physical pixels
     canvas.width  = Math.round(w * _dpr);
     canvas.height = Math.round(h * _dpr);
-
-    // CSS display size matches the wrap exactly
     canvas.style.width  = w + 'px';
     canvas.style.height = h + 'px';
 
-    // Reset transform completely, then apply DPR scale once
     ctx.setTransform(_dpr, 0, 0, _dpr, 0, 0);
-
     drawFrame(currentFrame);
   }
 
-  /* ---- Draw a single frame index (0-based, may be float for lerp) ---- */
+  /* ---- Draw a single frame index (0-based, may be float) ---- */
   function drawFrame(idx) {
     const i = Math.max(0, Math.min(TOTAL_FRAMES - 1, Math.round(idx)));
     const img = images[i];
 
-    // Always paint white over the full backing buffer (in CSS px space after ctx.setTransform)
     const bw = canvas.width  / _dpr;
     const bh = canvas.height / _dpr;
 
@@ -77,7 +70,6 @@ gsap.registerPlugin(ScrollTrigger);
 
     if (!img || !img.complete || !img.naturalWidth) return;
 
-    // object-fit: contain centred
     const iw = img.naturalWidth;
     const ih = img.naturalHeight;
     const scale = Math.min(bw / iw, bh / ih);
@@ -91,41 +83,8 @@ gsap.registerPlugin(ScrollTrigger);
     ctx.drawImage(img, dx, dy, dw, dh);
   }
 
-  /* ---- Preload all frames ---- */
-  function preload(onProgress) {
-    for (let i = 0; i < TOTAL_FRAMES; i++) {
-      const img = new Image();
-      img.src = framePath(i + 1); // files are 1-based
-      img.onload = () => {
-        loadedCount++;
-        if (onProgress) onProgress(loadedCount / TOTAL_FRAMES);
-        if (loadedCount === TOTAL_FRAMES) {
-          allLoaded = true;
-          onAllLoaded();
-        }
-      };
-      img.onerror = () => {
-        // Count errors so we don't stall forever
-        loadedCount++;
-        if (loadedCount === TOTAL_FRAMES) {
-          allLoaded = true;
-          onAllLoaded();
-        }
-      };
-      images[i] = img;
-    }
-  }
-
-  /* ---- Bootstrap ScrollTrigger after everything loads ---- */
-  function onAllLoaded() {
-    // Draw first frame immediately
-    drawFrame(0);
-    hideLoader();
-    initScrollTrigger();
-  }
-
   /* ---- Loading overlay ---- */
-  const loader = document.getElementById('canvasLoader');
+  const loader    = document.getElementById('canvasLoader');
   const loaderBar = document.getElementById('canvasLoaderBar');
 
   function updateLoader(pct) {
@@ -140,19 +99,27 @@ gsap.registerPlugin(ScrollTrigger);
     }
   }
 
-  /* ---- ScrollTrigger + rAF render loop ---- */
-  function initScrollTrigger() {
-    const LERP = 0.07; // lower = smoother / more lag; higher = snappier
+  /* ---- Create (or recreate) the ScrollTrigger ---- */
+  function createScrollTrigger() {
+    // Kill any existing instance cleanly before making a new one
+    if (st) {
+      st.kill();
+      st = null;
+    }
 
-    ScrollTrigger.create({
+    // Reset scroll position tracking
+    targetFrame = 0;
+
+    st = ScrollTrigger.create({
       trigger: hero,
       start: 'top top',
-      end: () => `+=${window.innerHeight * 3}`,
+      // Use a function so the value is always recalculated fresh on every refresh
+      end: () => `+=${window.innerHeight * 1}`,
       pin: true,
       anticipatePin: 1,
+      // invalidateOnRefresh forces GSAP to re-call start/end functions on every refresh
       invalidateOnRefresh: true,
       onUpdate(self) {
-        // Map scroll progress → frame index (0-based float)
         targetFrame = self.progress * (TOTAL_FRAMES - 1);
       },
       onEnter() {
@@ -162,52 +129,92 @@ gsap.registerPlugin(ScrollTrigger);
         if (scrollHint) gsap.to(scrollHint, { opacity: 0.5, duration: 0.4 });
       }
     });
-
-    /* rAF render loop — Apple-style fluid lerp */
-    function renderLoop() {
-      // Exponential approach (frame-rate independent feel)
-      currentFrame += (targetFrame - currentFrame) * LERP;
-
-      // Only redraw when visually meaningful change
-      if (Math.abs(currentFrame - lastRenderedFrame) > 0.05) {
-        drawFrame(currentFrame);
-        lastRenderedFrame = currentFrame;
-      }
-
-      requestAnimationFrame(renderLoop);
-    }
-
-    let lastRenderedFrame = -1;
-    renderLoop();
   }
 
-  /* ---- Init ---- */
-  resizeCanvas();
-  window.addEventListener('resize', resizeCanvas);
+  /* ---- Full refresh: recalculate everything and re-sync GSAP ---- */
+  function fullRefresh() {
+    resizeCanvas();
+    // ScrollTrigger.refresh() forces GSAP to re-measure all pinned sections
+    // and recompute start/end positions based on current DOM layout
+    ScrollTrigger.refresh(true);
+  }
 
-  // Start loading; show first frame as soon as it's ready for perceived speed
-  images[0] = new Image();
-  images[0].src = framePath(1);
-  images[0].onload = () => {
+  /* ---- Bootstrap after all frames are loaded ---- */
+  function onAllLoaded() {
+    drawFrame(0);
+    hideLoader();
+
+    // Step 1: create the trigger now with current layout
+    createScrollTrigger();
+
+    // Step 2: once the full page (fonts, images, everything) has settled,
+    // do a final authoritative refresh so the pin spacer reflects true heights
+    if (document.readyState === 'complete') {
+      // Already fully loaded — refresh on next frame so paint has settled
+      requestAnimationFrame(() => {
+        requestAnimationFrame(fullRefresh);
+      });
+    } else {
+      window.addEventListener('load', () => {
+        requestAnimationFrame(() => {
+          requestAnimationFrame(fullRefresh);
+        });
+      }, { once: true });
+    }
+  }
+
+  /* ---- rAF render loop — Apple-style fluid lerp ---- */
+  (function renderLoop() {
+    const LERP = 0.07;
+    currentFrame += (targetFrame - currentFrame) * LERP;
+
+    if (Math.abs(currentFrame - lastRenderedFrame) > 0.05) {
+      drawFrame(currentFrame);
+      lastRenderedFrame = currentFrame;
+    }
+
+    requestAnimationFrame(renderLoop);
+  })();
+
+  /* ---- Resize: debounce to avoid thrashing ---- */
+  let resizeTimer = null;
+  window.addEventListener('resize', () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      resizeCanvas();
+      // After resize, recalculate all ScrollTrigger positions
+      ScrollTrigger.refresh(true);
+    }, 150);
+  });
+
+  /* ---- Init: size canvas and kick off preload ---- */
+  resizeCanvas();
+
+  // Load frame 0 first for instant first-paint
+  const firstImg = new Image();
+  firstImg.src = framePath(1);
+  firstImg.onload = () => {
+    images[0] = firstImg;
     loadedCount++;
+    updateLoader(loadedCount / TOTAL_FRAMES);
     drawFrame(0);
   };
+  firstImg.onerror = () => { loadedCount++; };
+  images[0] = firstImg;
 
-  // Preload the rest
+  // Load remaining frames in parallel
   for (let i = 1; i < TOTAL_FRAMES; i++) {
     const img = new Image();
-    img.src = framePath(i + 1);
+    const idx = i; // capture for closure
+    img.src = framePath(idx + 1);
     img.onload = () => {
       loadedCount++;
       updateLoader(loadedCount / TOTAL_FRAMES);
-      if (loadedCount === TOTAL_FRAMES) {
-        allLoaded = true;
-        onAllLoaded();
-      }
+      if (loadedCount === TOTAL_FRAMES) onAllLoaded();
     };
     img.onerror = () => {
       loadedCount++;
-      if (loadedCount === TOTAL_FRAMES) { allLoaded = true; onAllLoaded(); }
+      if (loadedCount === TOTAL_FRAMES) onAllLoaded();
     };
     images[i] = img;
   }
