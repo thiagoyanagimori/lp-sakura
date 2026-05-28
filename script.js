@@ -5,6 +5,14 @@
 
 gsap.registerPlugin(ScrollTrigger);
 
+// --- Navbar border on scroll ---
+(function initNavbar() {
+  const navbar = document.getElementById('navbar');
+  window.addEventListener('scroll', () => {
+    navbar.classList.toggle('scrolled', window.scrollY > 10);
+  }, { passive: true });
+})();
+
 // --- Image Sequence Canvas Scrub ---
 (function initCanvasScrub() {
   const canvas = document.getElementById('heroCanvas');
