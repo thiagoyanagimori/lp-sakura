@@ -61,7 +61,12 @@ img, video {
   background: rgba(255, 255, 255, 0.82);
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
-  border-bottom: 1px solid var(--gray-200);
+  border-bottom: 1px solid transparent;
+  transition: border-color 0.3s ease;
+}
+
+#navbar.scrolled {
+  border-bottom-color: var(--gray-200);
 }
 
 .nav-inner {
@@ -114,7 +119,7 @@ img, video {
   position: relative;
   z-index: 2;
   text-align: center;
-  padding-top: 3rem;
+  padding-top: 5.5rem;
 }
 
 .hero-title {
